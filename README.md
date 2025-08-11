@@ -247,7 +247,7 @@ describe('ComponentName', () => {
 
 - **Component tests**: `ComponentName.spec.js` or `ComponentName.test.js`
 - **Unit tests**: `functionName.spec.js`
-- **Integration tests**: `featureName.integration.spec.js`
+- **Integration tests**: `featureName.integration.spec.js` or `featureName.spec.js`
 
 ### Describe Blocks
 
@@ -322,6 +322,10 @@ it('should show error when email is invalid', async () => {
 
 ```javascript
 // test-utils.js
+import { mount } from '@vue/test-utils';
+import { createTestingPinia } from '@pinia/testing';
+import { merge } from 'lodash-es';
+
 export const createWrapper = (component, options = {}) => {
   const defaultOptions = {
     global: {
@@ -347,20 +351,20 @@ const submitButton = findByTestId(wrapper, 'submit-button');
 ### 3. **Mock External Dependencies**
 
 ```javascript
-// Mock API calls
+// Mock API calls - Module-level mocking
 vi.mock('@/api/users', () => ({
   fetchUser: vi.fn(),
   updateUser: vi.fn(),
 }));
 
-// Mock router
+// Mock router - Direct object creation for simple cases
 const mockRouter = {
   push: vi.fn(),
   replace: vi.fn(),
   currentRoute: { value: { params: { id: '123' } } },
 };
 
-// Mock store
+// Mock store - Factory function for reusable mocks
 const createMockStore = (initialState = {}) => {
   return createTestingPinia({
     initialState: {
@@ -378,6 +382,8 @@ const createMockStore = (initialState = {}) => {
 
 ```javascript
 // ✅ GOOD - Proper async testing
+import { flushPromises } from '@vue/test-utils';
+
 it('should load user data on mount', async () => {
   const mockUser = { id: 1, name: 'John' };
   mockApi.fetchUser.mockResolvedValue(mockUser);
@@ -392,10 +398,13 @@ it('should load user data on mount', async () => {
 });
 
 // Handle loading states
-it('should show loading spinner while fetching data', () => {
+it('should show loading spinner while fetching data', async () => {
   mockApi.fetchUser.mockImplementation(() => new Promise(() => {})); // Never resolves
 
   const wrapper = createWrapper(UserProfile);
+  
+  // Wait for the component to mount and start loading
+  await wrapper.vm.$nextTick();
 
   expect(wrapper.find('.loading-spinner').exists()).toBe(true);
 });
@@ -412,6 +421,8 @@ it('should display error message when API call fails', async () => {
   await flushPromises();
 
   expect(wrapper.find('.error-message').text()).toContain(errorMessage);
+  expect(wrapper.find('.loading-spinner').exists()).toBe(false);
+  expect(wrapper.vm.isLoading).toBe(false);
 });
 ```
 
@@ -541,14 +552,18 @@ it('should show notification for 3 seconds', async () => {
 // ✅ GOOD - Control timing explicitly
 it('should hide notification after timeout', async () => {
   vi.useFakeTimers();
-  showNotification('Hello');
+  
+  const wrapper = mount(NotificationComponent);
+  wrapper.vm.showNotification('Hello');
 
   expect(wrapper.find('.notification').exists()).toBe(true);
 
+  // Fast-forward time
   vi.advanceTimersByTime(3000);
   await wrapper.vm.$nextTick();
 
   expect(wrapper.find('.notification').exists()).toBe(false);
+  
   vi.useRealTimers();
 });
 ```
@@ -663,20 +678,38 @@ const mockUserService = {
 ### 1. **Testing Composition API**
 
 ```javascript
-import { ref, computed } from 'vue';
+import { ref, computed, readonly } from 'vue';
 
 // composable.js
 export function useCounter(initialValue = 0) {
   const count = ref(initialValue);
   const doubled = computed(() => count.value * 2);
 
-  const increment = () => count.value++;
-  const decrement = () => count.value--;
+  const increment = () => {
+    count.value++;
+  };
+  
+  const decrement = () => {
+    count.value--;
+  };
 
-  return { count, doubled, increment, decrement };
+  const reset = () => {
+    count.value = initialValue;
+  };
+
+  return { 
+    count: readonly(count), 
+    doubled, 
+    increment, 
+    decrement, 
+    reset 
+  };
 }
 
 // composable.spec.js
+import { describe, it, expect } from 'vitest';
+import { useCounter } from './useCounter';
+
 describe('useCounter', () => {
   it('should initialize with default value', () => {
     const { count } = useCounter();
@@ -698,6 +731,16 @@ describe('useCounter', () => {
     increment();
     expect(count.value).toBe(1);
   });
+
+  it('should reset to initial value', () => {
+    const { count, increment, reset } = useCounter(5);
+    increment();
+    increment();
+    expect(count.value).toBe(7);
+    
+    reset();
+    expect(count.value).toBe(5);
+  });
 });
 ```
 
@@ -706,6 +749,9 @@ describe('useCounter', () => {
 ```javascript
 import { setActivePinia, createPinia } from 'pinia';
 import { createTestingPinia } from '@pinia/testing';
+import { mount } from '@vue/test-utils';
+import { vi } from 'vitest';
+import { useUserStore } from '@/stores/user';
 
 describe('Component with Store', () => {
   beforeEach(() => {
@@ -728,6 +774,19 @@ describe('Component with Store', () => {
 
     const store = useUserStore();
     expect(store.currentUser.name).toBe('John');
+  });
+
+  it('should call store actions', async () => {
+    const wrapper = mount(Component, {
+      global: {
+        plugins: [createTestingPinia({ createSpy: vi.fn })],
+      },
+    });
+
+    const store = useUserStore();
+    await wrapper.find('[data-testid="update-button"]').trigger('click');
+    
+    expect(store.updateUser).toHaveBeenCalledWith('John');
   });
 });
 ```
@@ -866,18 +925,37 @@ export class LoginPage {
     return this.wrapper.find('[data-testid="error-message"]');
   }
 
+  get loadingSpinner() {
+    return this.wrapper.find('[data-testid="loading-spinner"]');
+  }
+
   async login(email, password) {
     await this.emailInput.setValue(email);
     await this.passwordInput.setValue(password);
     await this.submitButton.trigger('click');
   }
 
-  async expectErrorMessage(message) {
-    expect(this.errorMessage.text()).toBe(message);
+  isLoading() {
+    return this.loadingSpinner.exists();
+  }
+
+  hasError() {
+    return this.errorMessage.exists();
+  }
+
+  getErrorText() {
+    return this.errorMessage.exists() ? this.errorMessage.text() : '';
+  }
+
+  isSubmitDisabled() {
+    return this.submitButton.attributes('disabled') !== undefined;
   }
 }
 
 // Usage in tests
+import { mount } from '@vue/test-utils';
+import { LoginPage } from './page-objects/LoginPage';
+
 describe('Login Flow', () => {
   let loginPage;
 
@@ -888,7 +966,19 @@ describe('Login Flow', () => {
 
   it('should show error for invalid credentials', async () => {
     await loginPage.login('invalid@email.com', 'wrongpassword');
-    await loginPage.expectErrorMessage('Invalid credentials');
+    
+    expect(loginPage.hasError()).toBe(true);
+    expect(loginPage.getErrorText()).toBe('Invalid credentials');
+  });
+
+  it('should disable submit button when loading', async () => {
+    // Setup API to delay response
+    mockApi.login.mockImplementation(() => new Promise(() => {}));
+    
+    await loginPage.login('user@email.com', 'password');
+    
+    expect(loginPage.isLoading()).toBe(true);
+    expect(loginPage.isSubmitDisabled()).toBe(true);
   });
 });
 ```
@@ -927,6 +1017,8 @@ it('should display admin badge for admin users', () => {
 
 ```javascript
 // test-utils/custom-matchers.js
+import { expect } from 'vitest';
+
 expect.extend({
   toBeVisible(received) {
     const pass = received.isVisible();
@@ -936,12 +1028,34 @@ expect.extend({
     };
   },
 
-  toHaveEmitted(wrapper, event, times = 1) {
+  toHaveEmitted(wrapper, event, expectedTimes = 1) {
     const emitted = wrapper.emitted(event);
-    const pass = emitted && emitted.length === times;
+    const actualTimes = emitted ? emitted.length : 0;
+    const pass = actualTimes === expectedTimes;
 
     return {
-      message: () => `expected component to have emitted "${event}" ${times} times, but got ${emitted?.length || 0}`,
+      message: () => 
+        `expected component to have emitted "${event}" ${expectedTimes} time${expectedTimes !== 1 ? 's' : ''}, but got ${actualTimes}`,
+      pass,
+    };
+  },
+
+  toHaveEmittedWith(wrapper, event, expectedPayload) {
+    const emitted = wrapper.emitted(event);
+    
+    if (!emitted || emitted.length === 0) {
+      return {
+        message: () => `expected component to have emitted "${event}" with payload, but event was not emitted`,
+        pass: false,
+      };
+    }
+
+    const lastEmission = emitted[emitted.length - 1];
+    const pass = JSON.stringify(lastEmission[0]) === JSON.stringify(expectedPayload);
+
+    return {
+      message: () => 
+        `expected component to have emitted "${event}" with ${JSON.stringify(expectedPayload)}, but got ${JSON.stringify(lastEmission[0])}`,
       pass,
     };
   },
@@ -952,6 +1066,12 @@ it('should show modal when button is clicked', async () => {
   await wrapper.find('button').trigger('click');
   expect(wrapper.find('.modal')).toBeVisible();
   expect(wrapper).toHaveEmitted('modal-opened', 1);
+});
+
+it('should emit user data when form is submitted', async () => {
+  const userData = { name: 'John', email: 'john@example.com' };
+  await wrapper.find('form').trigger('submit');
+  expect(wrapper).toHaveEmittedWith('user-submitted', userData);
 });
 ```
 
